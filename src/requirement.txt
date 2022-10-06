@@ -1,0 +1,8 @@
+tensorboard
+easydict
+torch
+torchvision
+torchaudio
+mxnet
+onnx
+sklearn
