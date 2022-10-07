@@ -1,4 +1,5 @@
 from .iresnet import iresnet18, iresnet34, iresnet50, iresnet100, iresnet200
+from .iresnetAda import IR_18, IR_34, IR_50, IR_101, IR_152, IR_200, IR_SE_50, IR_SE_101, IR_SE_152, IR_SE_200, build_model
 from .mobilefacenet import get_mbf
 
 
@@ -17,6 +18,19 @@ def get_model(name, **kwargs):
     elif name == "r2060":
         from .iresnet2060 import iresnet2060
         return iresnet2060(False, **kwargs)
+    
+    elif name == "ir_18":
+        return build_model("ir_18")
+    elif name == "ir_34":
+        return build_model("ir_34")
+    elif name == "ir_50":
+        return build_model("ir_50")
+    elif name == "ir_101":
+        return build_model("ir_101")
+    elif name == "ir_152":
+        return build_model("ir_152")
+    elif name == "ir_200":
+        return build_model("ir_200")
 
     elif name == "mbf":
         fp16 = kwargs.get("fp16", False)

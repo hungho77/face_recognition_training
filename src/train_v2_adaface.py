@@ -13,7 +13,7 @@ from backbones import get_model
 from dataset import get_dataloader
 from losses import CombinedMarginLoss, AdaFace, ArcFace, CosFace
 from lr_scheduler import PolyScheduler
-from partial_fc_v2 import PartialFC_V2
+from partial_fc_v3 import PartialFC_V2
 from utils.utils_callbacks import CallBackLogging, CallBackVerification
 from utils.utils_config import get_config
 from utils.utils_logging import AverageMeter, init_logging
@@ -23,7 +23,7 @@ assert torch.__version__ >= "1.9.0", "In order to enjoy the features of the new 
 we have upgraded the torch to 1.9.0. torch before than 1.9.0 may not work in the future."
 
 import wandb
-wandb.init(project="finetune_tinyface",entity="hungho7",name="arcface_v2")
+wandb.init(project="finetune_tinyface",entity="hungho7",name="adaface_v1")
 
 try:
     world_size = int(os.environ["WORLD_SIZE"])
@@ -34,7 +34,7 @@ except KeyError:
     rank = 0
     distributed.init_process_group(
         backend="nccl",
-        init_method="tcp://127.0.0.1:12584",
+        init_method="tcp://127.0.0.1:12586",
         rank=rank,
         world_size=world_size,
     )
@@ -78,11 +78,9 @@ def main(args):
     
     backbone = get_model(
         cfg.network, dropout=0.0, fp16=cfg.fp16, num_features=cfg.embedding_size).cuda()
-    
     if cfg.pretrained_backbone_model:
         backbone.load_state_dict(torch.load(cfg.pretrained_backbone_model, map_location=torch.device('cpu')))
         print('Successfully load pre-trained backbone model!')
-    
     backbone = torch.nn.parallel.DistributedDataParallel(
         module=backbone, broadcast_buffers=False, device_ids=[args.local_rank], bucket_cap_mb=16,
         find_unused_parameters=True)
@@ -140,7 +138,6 @@ def main(args):
 
     start_epoch = 0
     global_step = 0
-    
     if cfg.resume:
         dict_checkpoint = torch.load(os.path.join(cfg.output, f"checkpoint_gpu_{rank}.pt"))
         start_epoch = dict_checkpoint["epoch"]
@@ -158,6 +155,7 @@ def main(args):
 #     callback_verification = CallBackVerification(
 #         val_targets=cfg.val_targets, rec_prefix=cfg.rec, summary_writer=wandb
 #     )
+
     callback_logging = CallBackLogging(
         frequent=cfg.frequent,
         total_step=cfg.total_step,
@@ -175,8 +173,8 @@ def main(args):
             train_loader.sampler.set_epoch(epoch)
         for _, (img, local_labels) in enumerate(train_loader):
             global_step += 1
-            local_embeddings = backbone(img)
-            loss: torch.Tensor = module_partial_fc(local_embeddings, local_labels)
+            local_embeddings, norm = backbone(img)
+            loss: torch.Tensor = module_partial_fc(local_embeddings, local_labels, norm)
 
             if cfg.fp16:
                 amp.scale(loss).backward()
@@ -213,21 +211,21 @@ def main(args):
             torch.save(checkpoint, os.path.join(cfg.output, f"checkpoint_gpu_{rank}.pt"))
 
         if rank == 0:
-            path_module = os.path.join(cfg.output, "arcface_tinyface_v2_epochs_{}.pt".format(epoch))
+            path_module = os.path.join(cfg.output, "tinyface_adaface_v1_epochs_{}.pt".format(epoch))
             torch.save(backbone.module.state_dict(), path_module)
 
         if cfg.dali:
             train_loader.reset()
 
     if rank == 0:
-        path_module = os.path.join(cfg.output, "arcface_tinyface_v2_final.pt")
+        path_module = os.path.join(cfg.output, "tinyface_adaface_v1_final.pt")
         torch.save(backbone.module.state_dict(), path_module)
 
 
 if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     parser = argparse.ArgumentParser(
-        description="Distributed Arcface Training in Pytorch")
+        description="Distributed Adaface Training in Pytorch")
     parser.add_argument("config", type=str, help="py config file")
     parser.add_argument("--local_rank", type=int, default=0, help="local_rank")
     main(parser.parse_args())

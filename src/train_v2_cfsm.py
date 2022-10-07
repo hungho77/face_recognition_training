@@ -18,12 +18,14 @@ from utils.utils_callbacks import CallBackLogging, CallBackVerification
 from utils.utils_config import get_config
 from utils.utils_logging import AverageMeter, init_logging
 from utils.utils_distributed_sampler import setup_seed
+import synthesis_network
+import adversarial_regu
 
 assert torch.__version__ >= "1.9.0", "In order to enjoy the features of the new torch, \
 we have upgraded the torch to 1.9.0. torch before than 1.9.0 may not work in the future."
 
 import wandb
-wandb.init(project="finetune_tinyface",entity="hungho7",name="arcface_v2")
+wandb.init(project="finetune_tinyface",entity="hungho7",name="arcface_cfsm_v3")
 
 try:
     world_size = int(os.environ["WORLD_SIZE"])
@@ -34,7 +36,7 @@ except KeyError:
     rank = 0
     distributed.init_process_group(
         backend="nccl",
-        init_method="tcp://127.0.0.1:12584",
+        init_method="tcp://127.0.0.1:12585",
         rank=rank,
         world_size=world_size,
     )
@@ -78,17 +80,24 @@ def main(args):
     
     backbone = get_model(
         cfg.network, dropout=0.0, fp16=cfg.fp16, num_features=cfg.embedding_size).cuda()
-    
     if cfg.pretrained_backbone_model:
         backbone.load_state_dict(torch.load(cfg.pretrained_backbone_model, map_location=torch.device('cpu')))
         print('Successfully load pre-trained backbone model!')
-    
     backbone = torch.nn.parallel.DistributedDataParallel(
         module=backbone, broadcast_buffers=False, device_ids=[args.local_rank], bucket_cap_mb=16,
         find_unused_parameters=True)
     backbone.train()
     # FIXME using gradient checkpoint if there are some unused parameters will cause error
-    backbone._set_static_graph()
+    # backbone._set_static_graph()
+    
+    # synthesis model
+    syn_model = synthesis_network.Generator(dim=64, n_downsample=2, n_residual=3, style_dim=10, latent_dim=128)
+    syn_model.load_state_dict(torch.load(cfg.pretrained_synthesis_model,map_location=torch.device('cpu'))['G_state_dict'])
+    syn_model = syn_model.cuda()
+    syn_model = torch.nn.parallel.DistributedDataParallel(
+        module=syn_model, broadcast_buffers=False, device_ids=[args.local_rank])
+    syn_model.eval()
+    print('Successfully load pre-trained CFSM!')
     
     if cfg.loss == "Adaface":
         margin_loss = AdaFace()
@@ -96,7 +105,7 @@ def main(args):
         margin_loss = ArcFace()
     elif cfg.loss == "Cosface":
         margin_loss = CosFace()
-    else:
+    elif margin_loss == "CombinedMarginLoss":
         margin_loss = CombinedMarginLoss(
             64,
             cfg.margin_list[0],
@@ -104,6 +113,8 @@ def main(args):
             cfg.margin_list[2],
             cfg.interclass_filtering_threshold
         )
+    else:
+        raise
 
     if cfg.optimizer == "sgd":
         module_partial_fc = PartialFC_V2(
@@ -140,7 +151,6 @@ def main(args):
 
     start_epoch = 0
     global_step = 0
-    
     if cfg.resume:
         dict_checkpoint = torch.load(os.path.join(cfg.output, f"checkpoint_gpu_{rank}.pt"))
         start_epoch = dict_checkpoint["epoch"]
@@ -154,10 +164,11 @@ def main(args):
     for key, value in cfg.items():
         num_space = 25 - len(key)
         logging.info(": " + key + " " * num_space + str(value))
-        
+    
 #     callback_verification = CallBackVerification(
 #         val_targets=cfg.val_targets, rec_prefix=cfg.rec, summary_writer=wandb
 #     )
+    
     callback_logging = CallBackLogging(
         frequent=cfg.frequent,
         total_step=cfg.total_step,
@@ -173,10 +184,11 @@ def main(args):
 
         if isinstance(train_loader, DataLoader):
             train_loader.sampler.set_epoch(epoch)
-        for _, (img, local_labels) in enumerate(train_loader):
+        for data_idx, (img, local_labels) in enumerate(train_loader):
             global_step += 1
-            local_embeddings = backbone(img)
-            loss: torch.Tensor = module_partial_fc(local_embeddings, local_labels)
+            updated_img, updated_local_labels = adversarial_regu.adversarial_img_augmentation(cfg, syn_model, backbone, module_partial_fc, img, local_labels, opt)
+            local_embeddings = backbone(updated_img)
+            loss: torch.Tensor = module_partial_fc(local_embeddings, updated_local_labels)
 
             if cfg.fp16:
                 amp.scale(loss).backward()
@@ -213,21 +225,21 @@ def main(args):
             torch.save(checkpoint, os.path.join(cfg.output, f"checkpoint_gpu_{rank}.pt"))
 
         if rank == 0:
-            path_module = os.path.join(cfg.output, "arcface_tinyface_v2_epochs_{}.pt".format(epoch))
+            path_module = os.path.join(cfg.output, "arcface_cfsm_v3_tinyface_epochs_{}.pt".format(epoch))
             torch.save(backbone.module.state_dict(), path_module)
 
         if cfg.dali:
             train_loader.reset()
 
     if rank == 0:
-        path_module = os.path.join(cfg.output, "arcface_tinyface_v2_final.pt")
+        path_module = os.path.join(cfg.output, "arcface_cfsm_tinyface_v3_final.pt")
         torch.save(backbone.module.state_dict(), path_module)
 
 
 if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     parser = argparse.ArgumentParser(
-        description="Distributed Arcface Training in Pytorch")
+        description="Distributed Arcface + CFSM Training in Pytorch")
     parser.add_argument("config", type=str, help="py config file")
     parser.add_argument("--local_rank", type=int, default=0, help="local_rank")
     main(parser.parse_args())
