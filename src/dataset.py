@@ -55,61 +55,76 @@ def get_dataloader(
     batch_size,
     dali = False,
     seed = 2048,
-    num_workers = 2,
+    num_workers = 20,
+    mode = 'train'
     ) -> Iterable:
-
-    rec = os.path.join(root_dir, 'train.rec')
-    idx = os.path.join(root_dir, 'train.idx')
-    train_set = None
+    
+    
 
     # Synthetic
     if root_dir == "synthetic":
         train_set = SyntheticDataset()
         dali = False
 
-    # Mxnet RecordIO
-    elif os.path.exists(rec) and os.path.exists(idx):
-        train_set = MXFaceDataset(root_dir=root_dir, local_rank=local_rank)
-
     # Image Folder
     else:
-        transform = transforms.Compose([
-             Resize_with_pad(112,112),
-             transforms.RandomHorizontalFlip(),
-#              transforms.ColorJitter(0.4,0.4,0.4),
-             transforms.ToTensor(),
-             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        if mode == 'train':
+            transform = transforms.Compose([
+                 Resize_with_pad(112,112),
+                 transforms.RandomHorizontalFlip(),
+    #              transforms.ColorJitter(0.4,0.4,0.4),
+                 transforms.ToTensor(),
+                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+
+                 ])
+            train_set = ImageFolder(root_dir, transform)
+            rank, world_size = get_dist_info()
+            if seed is None:
+                init_fn = None
+            else:
+                init_fn = partial(worker_init_fn, num_workers=num_workers, rank=rank, seed=seed)
             
-             ])
-        train_set = ImageFolder(root_dir, transform)
+            train_sampler = DistributedSampler(
+                train_set, num_replicas=world_size, rank=rank, shuffle=True, seed=seed)
 
-    # DALI
-    if dali:
-        return dali_data_iter(
-            batch_size=batch_size, rec_file=rec, idx_file=idx,
-            num_threads=2, local_rank=local_rank)
+            train_loader = DataLoaderX(
+                local_rank=local_rank,
+                dataset=train_set,
+                batch_size=batch_size,
+                sampler=train_sampler,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=True,
+                worker_init_fn=init_fn,
+            )
 
-    rank, world_size = get_dist_info()
-    train_sampler = DistributedSampler(
-        train_set, num_replicas=world_size, rank=rank, shuffle=True, seed=seed)
+            return train_loader
+        else:
+            transform = transforms.Compose([
+                 Resize_with_pad(112,112),
+                 transforms.ToTensor(),
+                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
 
-    if seed is None:
-        init_fn = None
-    else:
-        init_fn = partial(worker_init_fn, num_workers=num_workers, rank=rank, seed=seed)
+                 ])
+            test_val_set = ImageFolder(root_dir, transform)
+            rank, world_size = get_dist_info()
+            
+            test_val_sampler = DistributedSampler(
+                test_val_set, num_replicas=world_size, rank=rank, shuffle=True, seed=seed)
 
-    train_loader = DataLoaderX(
-        local_rank=local_rank,
-        dataset=train_set,
-        batch_size=batch_size,
-        sampler=train_sampler,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
-        worker_init_fn=init_fn,
-    )
+            test_val_loader = DataLoaderX(
+                local_rank=local_rank,
+                dataset=test_valtest_val_set,
+                batch_size=batch_size,
+                sampler=test_val_sampler,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=True,
+                worker_init_fn=init_fn,
+            )
 
-    return train_loader
+            return test_val_loader
+
 
 class BackgroundGenerator(threading.Thread):
     def __init__(self, generator, local_rank, max_prefetch=6):
@@ -167,45 +182,6 @@ class DataLoaderX(DataLoader):
             raise StopIteration
         self.preload()
         return batch
-
-
-class MXFaceDataset(Dataset):
-    def __init__(self, root_dir, local_rank):
-        super(MXFaceDataset, self).__init__()
-        self.transform = transforms.Compose(
-            [transforms.ToPILImage(),
-             transforms.RandomHorizontalFlip(),
-             transforms.ToTensor(),
-             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-             ])
-        self.root_dir = root_dir
-        self.local_rank = local_rank
-        path_imgrec = os.path.join(root_dir, 'train.rec')
-        path_imgidx = os.path.join(root_dir, 'train.idx')
-        self.imgrec = mx.recordio.MXIndexedRecordIO(path_imgidx, path_imgrec, 'r')
-        s = self.imgrec.read_idx(0)
-        header, _ = mx.recordio.unpack(s)
-        if header.flag > 0:
-            self.header0 = (int(header.label[0]), int(header.label[1]))
-            self.imgidx = np.array(range(1, int(header.label[0])))
-        else:
-            self.imgidx = np.array(list(self.imgrec.keys))
-
-    def __getitem__(self, index):
-        idx = self.imgidx[index]
-        s = self.imgrec.read_idx(idx)
-        header, img = mx.recordio.unpack(s)
-        label = header.label
-        if not isinstance(label, numbers.Number):
-            label = label[0]
-        label = torch.tensor(label, dtype=torch.long)
-        sample = mx.image.imdecode(img).asnumpy()
-        if self.transform is not None:
-            sample = self.transform(sample)
-        return sample, label
-
-    def __len__(self):
-        return len(self.imgidx)
 
 
 class SyntheticDataset(Dataset):
