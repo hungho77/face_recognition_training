@@ -138,9 +138,11 @@ class AdaFace(torch.nn.Module):
 
     def forward(self, embbedings, norms, label):
 
-        kernel_norm = l2_norm(self.kernel,axis=0)
-        cosine = torch.mm(embbedings,kernel_norm)
-        cosine = cosine.clamp(-1+self.eps, 1-self.eps) # for stability
+#         kernel_norm = l2_norm(self.kernel,axis=0)
+#         cosine = torch.mm(embbedings,kernel_norm)
+#         cosine = cosine.clamp(-1+self.eps, 1-self.eps) # for stability
+        
+        cosine = embbedings
 
         safe_norms = torch.clip(norms, min=0.001, max=100) # for stability
         safe_norms = safe_norms.clone().detach()
