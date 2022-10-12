@@ -38,6 +38,7 @@ from scipy import interpolate
 from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold
 import random 
+from glob import glob
 
 class LFold:
     def __init__(self, n_splits=2, shuffle=False):
@@ -232,16 +233,29 @@ def load_dir(path, image_size):
     for flip in [0, 1]:
         data = torch.empty((len(issame_list) * 2, 3, image_size[0], image_size[1]))
         data_list.append(data)
-    for idx in range(len(issame_list) * 2):
+    for idx in range(len(issame_list)):
         _bin = bins[idx]
-        img = mx.image.imdecode(_bin)
-        if img.shape[1] != image_size[0]:
-            img = mx.image.resize_short(img, image_size[0])
-        img = nd.transpose(img, axes=(2, 0, 1))
-        for flip in [0, 1]:
-            if flip == 1:
-                img = mx.ndarray.flip(data=img, axis=2)
-            data_list[flip][idx][:] = torch.from_numpy(img.asnumpy())
+        for b in _bin:
+            img = mx.image.imread(b)
+#             import pdb;pdb.set_trace()
+#             img = mxnet.image.copyMakeBorder(src=img, top=_Null, bot=_Null, left=_Null, right=_Null, type=_Null, value=_Null, values=_Null, out=None, name=None, **kwargs)
+            h,w,c = img.shape
+            delta = int(abs(h-w)/2)
+            if h<w:
+                img = mx.image.copyMakeBorder(src=img, top=delta, bot=delta, left=0, right=0, value=0)
+            elif w<h:
+                img = mx.image.copyMakeBorder(src=img, top=0, bot=0, left=delta, right=delta, value=0)
+            else: 
+                pass
+                
+#             img = mx.image.imdecode(bi)
+#             if img.shape[1] != image_size[0]:
+            img = mx.image.imresize(img, image_size[0], image_size[1])
+            img = nd.transpose(img, axes=(2, 0, 1))
+            for flip in [0, 1]:
+                if flip == 1:
+                    img = mx.ndarray.flip(data=img, axis=2)
+                data_list[flip][idx][:] = torch.from_numpy(img.asnumpy())
         if idx % 1000 == 0:
             print('loading bin', idx)
     print(data_list[0].shape)
@@ -251,7 +265,9 @@ def load_dir(path, image_size):
 def read_dir(root):
     path_list = []
     issame = []
-    img_list = random.shuffle(glob(f'./{root}/*/*.jpg'))
+#     import pdb;pdb.set_trace()
+    img_list = glob(f'./{root}/*/*.jpg')
+    random.shuffle(img_list)
     img_list2 = img_list[:int(len(img_list)/2)]
     img_list3 = img_list[int(len(img_list)/2):]
     for i in range(int(len(img_list)/2)):
@@ -364,9 +380,9 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='do verification')
     # general
-    parser.add_argument('--data-dir', default='', help='')
+    parser.add_argument('--data-dir', default='../face_aligned/', help='')
     parser.add_argument('--model',
-                        default='../model/softmax,50',
+                        default='./trained_models/adaface_tinyface_r100/adaface_tinyface_v1_epochs_12.pt',
                         help='path to load model.')
     parser.add_argument('--target',
                         default='lfw,cfp_ff,cfp_fp,agedb_30',
@@ -426,7 +442,7 @@ if __name__ == '__main__':
         path = os.path.join(args.data_dir, name + ".bin")
         if os.path.exists(path):
             print('loading.. ', name)
-            data_set = load_bin(path, image_size)
+            data_set = load_dir(path, image_size)
             ver_list.append(data_set)
             ver_name_list.append(name)
 

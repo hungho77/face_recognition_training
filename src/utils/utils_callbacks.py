@@ -47,7 +47,7 @@ class CallBackVerification(object):
     def init_dataset(self, val_targets, data_dir, image_size):
         for name in val_targets:
 #             path = os.path.join(data_dir, name + ".bin")
-            if os.path.exists(path):
+            if os.path.exists(data_dir):
                 data_set = verification.load_dir(data_dir, image_size)
                 self.ver_list.append(data_set)
                 self.ver_name_list.append(name)
