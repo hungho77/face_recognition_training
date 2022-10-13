@@ -2,7 +2,7 @@ from easydict import EasyDict as edict
 
 config = edict()
 config.margin_list = (1.0, 0.0, 0.4)
-config.loss = "CombinedMarginLoss"
+config.loss = "Arcface"
 config.output = "./trained_models/arcface_finetune_tinyface_r100_v2"
 config.network = "r100"
 config.resume = False
@@ -20,7 +20,7 @@ config.dali = False
 config.frequent = 10
 config.score = None
 
-config.rec = "/home/hunght21/data/tinyface/Training_Set"
+config.rec_train = "/home/hunght21/data/tinyface/Training_Set"
 config.num_classes = 2570
 config.num_image = 7804
 config.num_epoch = 25

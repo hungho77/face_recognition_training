@@ -7,19 +7,26 @@ import torch
 from torch import distributed
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 from backbones import get_model
 from dataset import get_dataloader
-from losses import CombinedMarginLoss
+from losses import CombinedMarginLoss, AdaFace, ArcFace, CosFace
 from lr_scheduler import PolyScheduler
-from partial_fc import PartialFC, PartialFCAdamW
+from partial_fc import PartialFC
 from utils.utils_callbacks import CallBackLogging, CallBackVerification
 from utils.utils_config import get_config
 from utils.utils_logging import AverageMeter, init_logging
 from utils.utils_distributed_sampler import setup_seed
+import synthesis_network
+import adversarial_regu
+
 
 assert torch.__version__ >= "1.9.0", "In order to enjoy the features of the new torch, \
 we have upgraded the torch to 1.9.0. torch before than 1.9.0 may not work in the future."
+
+
+
 
 try:
     world_size = int(os.environ["WORLD_SIZE"])
@@ -37,7 +44,6 @@ except KeyError:
 
 
 def main(args):
-
     # get config
     cfg = get_config(args.config)
     # global control random seed
@@ -47,40 +53,66 @@ def main(args):
 
     os.makedirs(cfg.output, exist_ok=True)
     init_logging(rank, cfg.output)
-
-    summary_writer = (
-        SummaryWriter(log_dir=os.path.join(cfg.output, "tensorboard"))
-        if rank == 0
-        else None
-    )
+    
+    wandb.init(project="finetune_tinyface",entity="hungho7",name="arcface_cfsm_v3") 
+    wandb.config = {
+        "learning_rate": cfg.lr,
+        "epochs": cfg.num_epoch,
+        "batch_size": cfg.batch_size,
+        "momentum": 0.9,
+        "weight_decay": cfg.weight_decay,
+        "sample_rate": cfg.sample_rate
+    }
 
     train_loader = get_dataloader(
-        cfg.rec,
+        cfg.rec_train,
         args.local_rank,
         cfg.batch_size,
         cfg.dali,
         cfg.seed,
         cfg.num_workers
     )
-
+    
     backbone = get_model(
         cfg.network, dropout=0.0, fp16=cfg.fp16, num_features=cfg.embedding_size).cuda()
-
+    
+    if cfg.pretrained_backbone_model:
+        backbone.load_state_dict(torch.load(cfg.pretrained_backbone_model, map_location=torch.device('cpu')))
+        print('Successfully load pre-trained backbone model!')
+    
     backbone = torch.nn.parallel.DistributedDataParallel(
         module=backbone, broadcast_buffers=False, device_ids=[args.local_rank], bucket_cap_mb=16,
         find_unused_parameters=True)
-
     backbone.train()
     # FIXME using gradient checkpoint if there are some unused parameters will cause error
-    backbone._set_static_graph()
-
-    margin_loss = CombinedMarginLoss(
-        64,
-        cfg.margin_list[0],
-        cfg.margin_list[1],
-        cfg.margin_list[2],
-        cfg.interclass_filtering_threshold
-    )
+    # backbone._set_static_graph()
+    
+    if cfg.pretrained_synthesis_model is not None:
+        # synthesis model
+        syn_model = synthesis_network.Generator(dim=64, n_downsample=2, n_residual=3, style_dim=10, latent_dim=128)
+        syn_model.load_state_dict(torch.load(cfg.pretrained_synthesis_model,map_location=torch.device('cpu'))['G_state_dict'])
+        syn_model = syn_model.cuda()
+        syn_model = torch.nn.parallel.DistributedDataParallel(
+            module=syn_model, broadcast_buffers=False, device_ids=[args.local_rank])
+        syn_model.eval()
+        print('Successfully load pre-trained CFSM!')
+    
+    if cfg.loss == "Adaface":
+        margin_loss = AdaFace()
+    elif cfg.loss == "Arcface":
+        margin_loss = ArcFace()
+    elif cfg.loss == "Cosface":
+        margin_loss = CosFace()
+    elif margin_loss == "CombinedMarginLoss":
+        margin_loss = CombinedMarginLoss(
+            64,
+            cfg.margin_list[0],
+            cfg.margin_list[1],
+            cfg.margin_list[2],
+            cfg.interclass_filtering_threshold
+        )
+    else:
+        raise
 
     if cfg.optimizer == "sgd":
         module_partial_fc = PartialFC(
@@ -93,7 +125,7 @@ def main(args):
             lr=cfg.lr, momentum=0.9, weight_decay=cfg.weight_decay)
 
     elif cfg.optimizer == "adamw":
-        module_partial_fc = PartialFCAdamW(
+        module_partial_fc = PartialFC(
             margin_loss, cfg.embedding_size, cfg.num_classes,
             cfg.sample_rate, cfg.fp16)
         module_partial_fc.train().cuda()
@@ -130,16 +162,17 @@ def main(args):
     for key, value in cfg.items():
         num_space = 25 - len(key)
         logging.info(": " + key + " " * num_space + str(value))
-
-    callback_verification = CallBackVerification(
-        val_targets=cfg.val_targets, rec_prefix=cfg.rec, summary_writer=summary_writer
-    )
+    
+#     callback_verification = CallBackVerification(
+#         val_targets=cfg.val_targets, rec_prefix=cfg.rec, summary_writer=wandb
+#     )
+    
     callback_logging = CallBackLogging(
         frequent=cfg.frequent,
         total_step=cfg.total_step,
         batch_size=cfg.batch_size,
         start_step = global_step,
-        writer=summary_writer
+        writer=wandb
     )
 
     loss_am = AverageMeter()
@@ -149,31 +182,41 @@ def main(args):
 
         if isinstance(train_loader, DataLoader):
             train_loader.sampler.set_epoch(epoch)
-        for _, (img, local_labels) in enumerate(train_loader):
+        for data_idx, (img, local_labels) in enumerate(train_loader):
             global_step += 1
-            local_embeddings = backbone(img)
-            loss: torch.Tensor = module_partial_fc(local_embeddings, local_labels, opt)
+            if cfg.pretrained_synthesis_model is not None: 
+                updated_img, updated_local_labels = adversarial_regu.adversarial_img_augmentation(cfg, syn_model, backbone, module_partial_fc, img, local_labels, opt)
+                local_embeddings = backbone(updated_img)
+                loss: torch.Tensor = module_partial_fc(local_embeddings, updated_local_labels)
+            
+            else:
+                local_embeddings = backbone(img)
+                loss: torch.Tensor = module_partial_fc(local_embeddings, local_labels)
+
+            
 
             if cfg.fp16:
                 amp.scale(loss).backward()
-                amp.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
-                amp.step(opt)
-                amp.update()
+                if global_step % cfg.gradient_acc == 0:
+                    amp.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
+                    amp.step(opt)
+                    amp.update()
+                    opt.zero_grad()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
-                opt.step()
-
-            opt.zero_grad()
+                if global_step % cfg.gradient_acc == 0:
+                    torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
+                    opt.step()
+                    opt.zero_grad()
             lr_scheduler.step()
 
             with torch.no_grad():
                 loss_am.update(loss.item(), 1)
                 callback_logging(global_step, loss_am, epoch, cfg.fp16, lr_scheduler.get_last_lr()[0], amp)
 
-                if global_step % cfg.verbose == 0 and global_step > 0:
-                    callback_verification(global_step, backbone)
+#                 if global_step % cfg.verbose == 0 and global_step > 0:
+#                     callback_verification(global_step, backbone)
 
         if cfg.save_all_states:
             checkpoint = {
@@ -187,26 +230,21 @@ def main(args):
             torch.save(checkpoint, os.path.join(cfg.output, f"checkpoint_gpu_{rank}.pt"))
 
         if rank == 0:
-            path_module = os.path.join(cfg.output, "model.pt")
+            path_module = os.path.join(cfg.output, "arcface_cfsm_v3_tinyface_epochs_{}.pt".format(epoch))
             torch.save(backbone.module.state_dict(), path_module)
 
         if cfg.dali:
             train_loader.reset()
 
     if rank == 0:
-        path_module = os.path.join(cfg.output, "model.pt")
+        path_module = os.path.join(cfg.output, "arcface_cfsm_tinyface_v3_final.pt")
         torch.save(backbone.module.state_dict(), path_module)
-
-        from torch2onnx import convert_onnx
-        convert_onnx(backbone.module.cpu().eval(), path_module, os.path.join(cfg.output, "model.onnx"))
-
-    distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     parser = argparse.ArgumentParser(
-        description="Distributed Arcface Training in Pytorch")
+        description="Distributed Arcface + CFSM Training in Pytorch")
     parser.add_argument("config", type=str, help="py config file")
     parser.add_argument("--local_rank", type=int, default=0, help="local_rank")
     main(parser.parse_args())

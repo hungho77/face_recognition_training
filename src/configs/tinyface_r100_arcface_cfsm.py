@@ -20,7 +20,8 @@ config.dali = False
 config.frequent = 10
 config.score = None
 
-config.rec = "/home/hunght21/data/tinyface/Training_Set"
+config.rec_train = "/home/hunght21/data/tinyface/Training_Set"
+config.rec_val = None
 config.num_classes = 2570
 config.num_image = 7804
 config.num_epoch = 25

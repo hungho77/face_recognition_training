@@ -103,7 +103,7 @@ class CosFace(torch.nn.Module):
         logits[index, labels[index].view(-1)] = final_target_logit
         logits = logits * self.s
         return logits
-    
+
 class AdaFace(torch.nn.Module):
     def __init__(self,
                  embedding_size=512,
@@ -115,10 +115,7 @@ class AdaFace(torch.nn.Module):
                  ):
         super(AdaFace, self).__init__()
         self.classnum = classnum
-        self.kernel = torch.nn.Parameter(torch.Tensor(embedding_size,classnum))
 
-        # initial kernel
-        self.kernel.data.uniform_(-1, 1).renorm_(2,1,1e-5).mul_(1e5)
         self.m = m 
         self.eps = 1e-3
         self.h = h
@@ -129,6 +126,12 @@ class AdaFace(torch.nn.Module):
         self.register_buffer('t', torch.zeros(1))
         self.register_buffer('batch_mean', torch.ones(1)*(20))
         self.register_buffer('batch_std', torch.ones(1)*100)
+        
+        # Compute
+        self.cos_m = math.cos(m)
+        self.sin_m = math.sin(m)
+        self.theta = math.cos(math.pi - m)
+        self.sinmm = math.sin(math.pi - m) * m
 
         print('\n\AdaFace with the following property')
         print('self.m', self.m)
@@ -136,17 +139,10 @@ class AdaFace(torch.nn.Module):
         print('self.s', self.s)
         print('self.t_alpha', self.t_alpha)
 
-    def forward(self, embbedings, norms, label):
-
-#         kernel_norm = l2_norm(self.kernel,axis=0)
-#         cosine = torch.mm(embbedings,kernel_norm)
-#         cosine = cosine.clamp(-1+self.eps, 1-self.eps) # for stability
+    def forward(self, logits: torch.Tensor, safe_norms: torch.Tensor, labels: torch.Tensor):
+        index = torch.where(labels != -1)[0]
+        target_logit = logits[index, labels[index].view(-1)]
         
-        cosine = embbedings
-
-        safe_norms = torch.clip(norms, min=0.001, max=100) # for stability
-        safe_norms = safe_norms.clone().detach()
-
         # update batchmean batchstd
         with torch.no_grad():
             mean = safe_norms.mean().detach()
@@ -156,29 +152,27 @@ class AdaFace(torch.nn.Module):
 
         margin_scaler = (safe_norms - self.batch_mean) / (self.batch_std+self.eps) # 66% between -1, 1
         margin_scaler = margin_scaler * self.h # 68% between -0.333 ,0.333 when h:0.333
-        margin_scaler = torch.clip(margin_scaler, -1, 1)
-        # ex: m=0.5, h:0.333
-        # range
-        #       (66% range)
-        #   -1 -0.333  0.333   1  (margin_scaler)
-        # -0.5 -0.166  0.166 0.5  (m * margin_scaler)
+        margin_scaler = torch.clip(margin_scaler, -1, 1)  # z_hat norm
 
         # g_angular
-        m_arc = torch.zeros(label.size()[0], cosine.size()[1], device=cosine.device)
-        m_arc.scatter_(1, label.reshape(-1, 1), 1.0)
-        g_angular = self.m * margin_scaler * -1
-        m_arc = m_arc * g_angular
-        theta = cosine.acos()
-        theta_m = torch.clip(theta + m_arc, min=self.eps, max=math.pi-self.eps)
-        cosine = theta_m.cos()
-
+        g_angular = -self.m * margin_scaler
+        sin_theta = torch.sqrt(1.0 - torch.pow(target_logit, 2))
+        cos_g_angle = g_angular.cos().view(-1)
+        sin_g_angle = g_angular.sin().view(-1)
+        cos_theta_m = target_logit * cos_g_angle - sin_theta * sin_g_angle  # cos(target+g_angle)
+        
         # g_additive
-        m_cos = torch.zeros(label.size()[0], cosine.size()[1], device=cosine.device)
-        m_cos.scatter_(1, label.reshape(-1, 1), 1.0)
-        g_add = self.m + (self.m * margin_scaler)
-        m_cos = m_cos * g_add
-        cosine = cosine - m_cos
-
+        g_add = self.m + (self.m * margin_scaler).view(-1)
+        cos_theta_m = cos_theta_m - g_add
+        
+        # Filter positive and negative
+        final_target_logit = torch.where(
+                target_logit > self.theta, cos_theta_m, target_logit - self.sinmm)
+        logits[index, labels[index].view(-1)] = final_target_logit
+        
         # scale
-        scaled_cosine_m = cosine * self.s
-        return scaled_cosine_m
+        logits = logits * self.s
+        
+        return logits
+
+        

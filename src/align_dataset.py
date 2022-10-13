@@ -62,8 +62,8 @@ def main(args):
 def parse_arguments(argv):
     parser = argparse.ArgumentParser()
     
-    parser.add_argument('--input_dir', default="../FSSProfileHCM", type=str, help='Directory with unaligned images.')
-    parser.add_argument('--output_dir', default="../aligned_FSSProfileHCM", type=str, help='Directory with aligned face thumbnails.')
+    parser.add_argument('--input_dir', default="./FSSProfileHCM", type=str, help='Directory with unaligned images.')
+    parser.add_argument('--output_dir', default="./aligned_FSSProfileHCM", type=str, help='Directory with aligned face thumbnails.')
 
     return parser.parse_args(argv)
 
