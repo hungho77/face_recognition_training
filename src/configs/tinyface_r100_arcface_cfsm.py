@@ -1,8 +1,8 @@
 from easydict import EasyDict as edict
 
 config = edict()
-config.margin_list = (1.0, 0.0, 0.4)
-config.loss = "Arcface"
+config.margin_list = None
+config.loss = "Adaface"
 config.output = "./trained_models/arcface_cfsm_finetune_tinyface_r100_v3"
 config.network = "r100"
 config.resume = False
@@ -21,13 +21,13 @@ config.frequent = 10
 config.score = None
 
 config.rec_train = "/home/hunght21/data/tinyface/Training_Set"
-config.rec_val = None
+config.rec_val = "./data/train_tmp"
 config.num_classes = 2570
 config.num_image = 7804
 config.num_epoch = 25
 config.warmup_epoch = 2
 # config.val_targets = ['lfw', 'cfp_fp', "agedb_30"]
-config.val_targets = None
+config.val_targets = ["face_aligned"]
 config.save_all_states = True
 
 

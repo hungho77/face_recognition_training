@@ -163,9 +163,9 @@ def main(args):
         num_space = 25 - len(key)
         logging.info(": " + key + " " * num_space + str(value))
     
-#     callback_verification = CallBackVerification(
-#         val_targets=cfg.val_targets, rec_prefix=cfg.rec, summary_writer=wandb
-#     )
+    callback_verification = CallBackVerification(
+        val_targets=cfg.val_targets, rec_prefix=cfg.rec_val, summary_writer=wandb
+    )
     
     callback_logging = CallBackLogging(
         frequent=cfg.frequent,
@@ -215,8 +215,8 @@ def main(args):
                 loss_am.update(loss.item(), 1)
                 callback_logging(global_step, loss_am, epoch, cfg.fp16, lr_scheduler.get_last_lr()[0], amp)
 
-#                 if global_step % cfg.verbose == 0 and global_step > 0:
-#                     callback_verification(global_step, backbone)
+                if global_step % cfg.verbose == 0 and global_step > 0:
+                    callback_verification(global_step, backbone)
 
         if cfg.save_all_states:
             checkpoint = {
